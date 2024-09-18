@@ -39,6 +39,7 @@ android {
 
 dependencies {
     implementation("org.godotengine:godot:4.2.0.stable")
+    implementation("androidx.appcompat:appcompat:1.7.0-alpha03")
 }
 
 // BUILD TASKS DEFINITION

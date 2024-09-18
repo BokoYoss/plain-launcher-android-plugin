@@ -48,6 +48,16 @@ class AndroidExportPlugin extends EditorExportPlugin:
 						\n
 
 					</intent-filter>\n
+
+					<provider
+						android:name="androidx.core.content.FileProvider"
+						android:authorities="org.godotengine.plainlauncher.fileprovider"
+						android:exported="false"
+						android:grantUriPermissions="true">
+						<meta-data
+							android:name="android.support.FILE_PROVIDER_PATHS"
+							android:resource="@xml/file_provider_paths" />
+					</provider>
 		"""
 		
 		return contents

@@ -6,23 +6,21 @@ import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ApplicationInfo
-import android.content.pm.PackageInfo
 import android.net.Uri
 import android.os.Environment
 import android.os.storage.StorageManager
 import android.provider.DocumentsContract
+import android.provider.Settings
 import android.util.Log
-import android.widget.Toast
+import androidx.core.content.FileProvider
 import org.godotengine.godot.Godot
 import org.godotengine.godot.plugin.GodotPlugin
 import org.godotengine.godot.plugin.SignalInfo
 import org.godotengine.godot.plugin.UsedByGodot
 import org.json.JSONException
 import org.json.JSONObject
-import org.json.JSONStringer
 import java.io.File
 import java.net.URLEncoder
-
 
 object RequestCodes {
     const val REQUEST_SET_STORAGE = 1
@@ -230,6 +228,13 @@ class GodotAndroidPlugin(godot: Godot): GodotPlugin(godot) {
     }
 
     @UsedByGodot
+    private fun openAppSpecificSettings(pkg: String) {
+        val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS)
+        intent.data = Uri.parse("package:" + pkg)
+        activity?.startActivity(intent)
+    }
+
+    @UsedByGodot
     private fun getInstalledAppList(): String {
         val intent = Intent(Intent.ACTION_MAIN, null)
         intent.addCategory(Intent.CATEGORY_LAUNCHER)
@@ -298,9 +303,21 @@ class GodotAndroidPlugin(godot: Godot): GodotPlugin(godot) {
 
         var data = intentMap.optString("data")
         if (data != null && data != "") {
-            Log.d(pluginName, data)
-            intent.setData(Uri.parse(data))
-            command += " -d \"" + data + "\" "
+            //Log.d(pluginName, data)
+            /**
+            val directory = File(Environment.getExternalStorageDirectory(), "internal")
+            val path = File(
+                directory,
+                data.split("/PlainLauncher/".toRegex()).dropLastWhile { it.isEmpty() }
+                    .toTypedArray().get(1))
+            var fileUri = PlainLauncherFileProvider.getUriForFile(activity!!, "org.plain.launcher.fileprovider", path)
+            **/
+            //var fileUri = FileProvider.getUriForFile(activity!!, "org.plain.launcher.fileprovider", File(data))
+            var fileUri = Uri.parse(data)
+            Log.i(pluginName, fileUri.path.toString())
+            intent.setData(fileUri)
+            intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            command += " -d \"" + fileUri.path.toString() + "\" "
         }
 
         var category = intentMap.optString("category")
