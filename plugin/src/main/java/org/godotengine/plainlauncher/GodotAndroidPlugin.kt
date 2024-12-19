@@ -6,11 +6,13 @@ import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ApplicationInfo
-import android.content.pm.PackageInfo
 import android.net.Uri
+import android.os.Build
+import android.os.Build.VERSION.SDK_INT
 import android.os.Environment
 import android.os.storage.StorageManager
 import android.provider.DocumentsContract
+import android.provider.Settings
 import android.util.Log
 import android.widget.Toast
 import org.godotengine.godot.Godot
@@ -19,7 +21,6 @@ import org.godotengine.godot.plugin.SignalInfo
 import org.godotengine.godot.plugin.UsedByGodot
 import org.json.JSONException
 import org.json.JSONObject
-import org.json.JSONStringer
 import java.io.File
 import java.net.URLEncoder
 
@@ -27,6 +28,7 @@ import java.net.URLEncoder
 object RequestCodes {
     const val REQUEST_SET_STORAGE = 1
     const val REQUEST_GET_DOWNLOADED_IMAGE = 2
+    const val REQUEST_PERMISSIONS = 3
 }
 
 class GodotAndroidPlugin(godot: Godot): GodotPlugin(godot) {
@@ -75,9 +77,25 @@ class GodotAndroidPlugin(godot: Godot): GodotPlugin(godot) {
 
             emitSignal("configure_storage_location", data?.data?.path)
         } else if (requestCode == RequestCodes.REQUEST_GET_DOWNLOADED_IMAGE) {
-            Log.i(pluginName, "GOT RESULT FOR " + requestCode + " WITH RETURN CODE " + resultCode + " WITH DATA " + data?.data?.path)
+            Log.i(
+                pluginName,
+                "GOT RESULT FOR " + requestCode + " WITH RETURN CODE " + resultCode + " WITH DATA " + data?.data?.path
+            )
 
             emitSignal("image_downloaded", data?.data?.path)
+        }
+        else if (requestCode == RequestCodes.REQUEST_PERMISSIONS) {
+            if (SDK_INT >= Build.VERSION_CODES.R) {
+                if (Environment.isExternalStorageManager()) {
+                    // perform action when allow permission success
+                } else {
+                    Toast.makeText(
+                        activity?.applicationContext,
+                        "File permission granted!",
+                        Toast.LENGTH_SHORT
+                    ).show();
+                }
+            }
         }
     }
 
@@ -130,6 +148,36 @@ class GodotAndroidPlugin(godot: Godot): GodotPlugin(godot) {
             }
         }
         return null
+    }
+
+    @UsedByGodot
+    private fun hasFilePermissions(): Boolean {
+        return SDK_INT >= Build.VERSION_CODES.R && Environment.isExternalStorageManager()
+    }
+
+    @UsedByGodot
+    private fun requestFilePermissions() {
+        if (SDK_INT >= Build.VERSION_CODES.R) {
+            try {
+                val intent = Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION)
+                intent.addCategory("android.intent.category.DEFAULT")
+                intent.setData(
+                    Uri.parse(
+                        java.lang.String.format(
+                            "package:%s",
+                            activity?.applicationContext?.packageName
+                        )
+                    )
+                )
+                activity?.startActivityForResult(intent, RequestCodes.REQUEST_PERMISSIONS)
+            } catch (e: Exception) {
+                val intent = Intent()
+                intent.setAction(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION)
+                activity?.startActivityForResult(intent, RequestCodes.REQUEST_PERMISSIONS)
+            }
+        } else {
+            Log.i(pluginName, "Unable to request file permissions on older Android versions.")
+        }
     }
 
     @UsedByGodot
@@ -209,11 +257,24 @@ class GodotAndroidPlugin(godot: Godot): GodotPlugin(godot) {
     }
 
     @UsedByGodot
-    private fun launchBrowserForDownload(game: String, system: String) {
+    private fun launchBrowserForDownload(game: String, system: String, source: String) {
         var urlString = "https://www.google.com/search?tbm=isch&q=" + URLEncoder.encode(game + " " + system + " type:png", "utf-8")
+
+        if (source.lowercase().equals("tgdb")) {
+            urlString = "https://thegamesdb.net/search.php?name=" + URLEncoder.encode(game, "utf-8")
+        }
+        else if (source.lowercase().equals("duckduckgo")) {
+            urlString = "https://duckduckgo.com/?t=h_&iax=images&ia=images&q=" + URLEncoder.encode(game, "utf-8")
+        }
+        else if (source.lowercase().equals("launchbox")) {
+            urlString = "https://gamesdb.launchbox-app.com/games/results/" + URLEncoder.encode(game, "utf-8").replace("+", "%20")
+        }
+        else if (source.lowercase().equals("steamgriddb")) {
+            urlString = "https://www.steamgriddb.com/search/grids?term=" + URLEncoder.encode(game, "utf-8")
+        }
         val launcher: Intent? = Intent(Intent.ACTION_VIEW, Uri.parse(urlString))
         launcher?.flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
-        Log.i(pluginName, "Attempting image search request for " + urlString)
+        Log.i(pluginName, "Attempting image search request for " + source + ": " + urlString)
 
         if (launcher != null) {
             activity?.startActivity(launcher)
