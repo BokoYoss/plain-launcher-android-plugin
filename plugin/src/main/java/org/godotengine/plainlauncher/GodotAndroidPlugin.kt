@@ -1,11 +1,13 @@
 package org.godotengine.plainlauncher
 
+import android.Manifest
 import android.app.Activity
 import android.content.ActivityNotFoundException
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ApplicationInfo
+import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.os.Build.VERSION.SDK_INT
@@ -15,6 +17,7 @@ import android.provider.DocumentsContract
 import android.provider.Settings
 import android.util.Log
 import android.widget.Toast
+import androidx.core.content.FileProvider
 import org.godotengine.godot.Godot
 import org.godotengine.godot.plugin.GodotPlugin
 import org.godotengine.godot.plugin.SignalInfo
@@ -29,6 +32,7 @@ object RequestCodes {
     const val REQUEST_SET_STORAGE = 1
     const val REQUEST_GET_DOWNLOADED_IMAGE = 2
     const val REQUEST_PERMISSIONS = 3
+    const val LAUNCH_APPLICATION = 4
 }
 
 class GodotAndroidPlugin(godot: Godot): GodotPlugin(godot) {
@@ -48,7 +52,28 @@ class GodotAndroidPlugin(godot: Godot): GodotPlugin(godot) {
                 String::class.java
             ),
         )
+        signals.add(
+            SignalInfo(
+                "failure_to_launch",
+                String::class.java
+            ),
+        )
         return signals
+    }
+
+    fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<String?>?,
+        grantResults: IntArray
+    ) {
+        if (requestCode == RequestCodes.REQUEST_PERMISSIONS) {
+            if (grantResults.size > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
+                //Permission Granted
+                Log.i(pluginName, "Permissions granted.")
+            } else {
+                Log.i(pluginName, "Permissions request failed.")
+            }
+        }
     }
 
     override fun onMainActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
@@ -95,6 +120,34 @@ class GodotAndroidPlugin(godot: Godot): GodotPlugin(godot) {
                         Toast.LENGTH_SHORT
                     ).show();
                 }
+            }
+        }
+        /**
+        else if (requestCode == RequestCodes.LAUNCH_APPLICATION) {
+            super.onMainActivityResult(requestCode, resultCode, data)
+            Log.i(
+                pluginName,
+                "GOT RESULT FOR " + requestCode + " WITH RETURN CODE " + resultCode + " WITH DATA " + data?.data?.path
+            )
+            if (resultCode != Activity.RESULT_OK) {
+                Log.e(pluginName, "Failed to launch application: " + resultCode.toString() + " data: " + data?.component)
+                emitSignal("failure_to_launch", resultCode.toString())
+            }
+        }
+        **/
+    }
+
+    override fun onMainRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>?,
+        grantResults: IntArray?
+    ) {
+        if (requestCode == RequestCodes.REQUEST_PERMISSIONS) {
+            if (grantResults!!.size == 2 && grantResults!![0] == PackageManager.PERMISSION_GRANTED && grantResults!![1] == PackageManager.PERMISSION_GRANTED) {
+                //Permission Granted
+                Log.i(pluginName, "Permissions granted.")
+            } else {
+                Log.i(pluginName, "Permissions request failed.")
             }
         }
     }
@@ -176,7 +229,7 @@ class GodotAndroidPlugin(godot: Godot): GodotPlugin(godot) {
                 activity?.startActivityForResult(intent, RequestCodes.REQUEST_PERMISSIONS)
             }
         } else {
-            Log.i(pluginName, "Unable to request file permissions on older Android versions.")
+            activity?.requestPermissions(arrayOf(Manifest.permission.WRITE_EXTERNAL_STORAGE, Manifest.permission.READ_EXTERNAL_STORAGE), RequestCodes.REQUEST_PERMISSIONS)
         }
     }
 
@@ -325,6 +378,13 @@ class GodotAndroidPlugin(godot: Godot): GodotPlugin(godot) {
         return "SUCCESS"
     }
 
+    @UsedByGodot
+    private fun openAppSpecificSettings(pkg: String) {
+        val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS)
+        intent.data = Uri.parse("package:" + pkg)
+        activity?.startActivity(intent)
+    }
+
     /**
      * Example showing how to declare a method that's used by Godot.
      *
@@ -348,20 +408,38 @@ class GodotAndroidPlugin(godot: Godot): GodotPlugin(godot) {
         try {
             var componentPackage = intentMap.getString("componentPackage")
             var componentClass = intentMap.getString("componentClass")
-            intent.component = ComponentName(
+            var componentName = ComponentName(
                 componentPackage,
                 componentClass
             )
-            command += "-n " + componentPackage + componentClass.replace(componentPackage, "/")
+            intent.component = componentName
+            command += "-n " + componentName.flattenToString()
         } catch (e: JSONException) {
             Log.w(pluginName, "Missing component path: " + serializedIntent)
         }
 
         var data = intentMap.optString("data")
         if (data != null && data != "") {
-            Log.d(pluginName, data)
+            //Log.i(pluginName, "Created file provider uri: " + uri.toString())
             intent.setData(Uri.parse(data))
             command += " -d \"" + data + "\" "
+        }
+
+        var providedFile = intentMap.optString("providedFile")
+        if (providedFile != null && providedFile != "") {
+            var dataFile = File(providedFile)
+            try {
+                var uri: Uri = FileProvider.getUriForFile(
+                    activity,
+                    "plain.launcher.fileprovider",
+                    dataFile
+                )
+                intent.setData(uri)
+                Log.i(pluginName, "Created file provider uri: " + uri.path)
+                command += " -d \"" + uri.toString() + "\" "
+            } catch (e: Exception) {
+                Log.e(pluginName, "Failed to make file provider: " + e.toString(), e)
+            }
         }
 
         var category = intentMap.optString("category")
@@ -391,16 +469,20 @@ class GodotAndroidPlugin(godot: Godot): GodotPlugin(godot) {
         Log.i(pluginName, command)
 
         intent.flags =
-            Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_CLEAR_TASK or Intent.FLAG_ACTIVITY_NO_HISTORY
+            Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_CLEAR_TASK or Intent.FLAG_ACTIVITY_NO_HISTORY or Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
         try {
             activity?.startActivity(intent)
         } catch (e: ActivityNotFoundException) {
+            Log.e(pluginName, intent.component?.packageName + " not found.")
             return intent.component?.packageName + " not found."
+        } catch (e: Exception) {
+            return intent.component?.packageName + " failed to launch: " + e.message
         }
         if (intent.component?.packageName != null) {
-            return "Launching " + intent.component?.packageName
+            //return "Launching " + intent.component?.packageName
         } else {
-            return "Launching " + action
+            //return "Launching " + action
         }
+        return ""
     }
 }

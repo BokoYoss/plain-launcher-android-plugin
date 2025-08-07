@@ -35,6 +35,25 @@ class AndroidExportPlugin extends EditorExportPlugin:
 		return _plugin_name
 
 	# Override to add to manifest
+	func _get_android_manifest_application_element_contents(platform: EditorExportPlatform, debug: bool) -> String:
+		if not _supports_platform(platform):
+			return ""
+		
+		return """
+		<provider
+			android:name="androidx.core.content.FileProvider"
+			android:authorities="plain.launcher.fileprovider"
+			android:exported="false"
+			android:grantUriPermissions="true"
+			tools:replace="android:authorities">
+			<meta-data
+				android:name="android.support.FILE_PROVIDER_PATHS"
+				android:resource="@xml/plain_launcher_file_paths"
+				tools:replace="android:resource" />
+		</provider>
+		"""
+
+	# Override to add to manifest
 	func _get_android_manifest_activity_element_contents(platform, debug):
 		if not _supports_platform(platform):
 			return ""
