@@ -59,6 +59,7 @@ class AndroidExportPlugin extends EditorExportPlugin:
 			return ""
 
 		var contents = """
+					android:supportsPictureInPicture="true"
 					<intent-filter>\n
 						<action android:name=\"android.intent.action.MAIN\" />\n
 						<category android:name=\"android.intent.category.LAUNCHER\" />\n
