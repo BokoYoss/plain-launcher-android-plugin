@@ -385,6 +385,11 @@ class GodotAndroidPlugin(godot: Godot): GodotPlugin(godot) {
         activity?.startActivity(intent)
     }
 
+    override fun onMainResume() {
+        super.onMainResume()
+        Log.i(pluginName,"RESUMING")
+    }
+
     /**
      * Example showing how to declare a method that's used by Godot.
      *
@@ -468,8 +473,11 @@ class GodotAndroidPlugin(godot: Godot): GodotPlugin(godot) {
         command += "  --activity-clear-task --activity-clear-top --activity-no-history"
         Log.i(pluginName, command)
 
+        if (intentMap.getString("killProcess") == "true") {
+            Log.i(pluginName, "Killing process " + intent.component.packageName + " before starting")
+        }
         intent.flags =
-            Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_CLEAR_TASK or Intent.FLAG_ACTIVITY_NO_HISTORY or Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+            Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_CLEAR_TASK or Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_NO_HISTORY or Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
         try {
             activity?.startActivity(intent)
         } catch (e: ActivityNotFoundException) {
