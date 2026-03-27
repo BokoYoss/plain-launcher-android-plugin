@@ -33,6 +33,7 @@ object RequestCodes {
     const val REQUEST_GET_DOWNLOADED_IMAGE = 2
     const val REQUEST_PERMISSIONS = 3
     const val LAUNCH_APPLICATION = 4
+    const val REQUEST_WEB_IMAGE = 5
 }
 
 class GodotAndroidPlugin(godot: Godot): GodotPlugin(godot) {
@@ -55,6 +56,12 @@ class GodotAndroidPlugin(godot: Godot): GodotPlugin(godot) {
         signals.add(
             SignalInfo(
                 "failure_to_launch",
+                String::class.java
+            ),
+        )
+        signals.add(
+            SignalInfo(
+                "text_input_complete",
                 String::class.java
             ),
         )
@@ -102,12 +109,29 @@ class GodotAndroidPlugin(godot: Godot): GodotPlugin(godot) {
 
             emitSignal("configure_storage_location", data?.data?.path)
         } else if (requestCode == RequestCodes.REQUEST_GET_DOWNLOADED_IMAGE) {
-            Log.i(
-                pluginName,
-                "GOT RESULT FOR " + requestCode + " WITH RETURN CODE " + resultCode + " WITH DATA " + data?.data?.path
-            )
-
-            emitSignal("image_downloaded", data?.data?.path)
+            Log.i(pluginName, "GOT RESULT FOR $requestCode WITH RETURN CODE $resultCode WITH DATA ${data?.data?.path}")
+            if (resultCode != Activity.RESULT_OK || data?.data == null) {
+                emitSignal("image_downloaded", "")
+                return
+            }
+            try {
+                val inputStream = activity?.contentResolver?.openInputStream(data.data!!)
+                if (inputStream == null) {
+                    emitSignal("image_downloaded", "")
+                    return
+                }
+                val tempFile = java.io.File(activity?.cacheDir, "chosen_art.tmp")
+                tempFile.outputStream().use { output -> inputStream.copyTo(output) }
+                inputStream.close()
+                emitSignal("image_downloaded", tempFile.absolutePath)
+            } catch (e: Exception) {
+                Log.e(pluginName, "Failed to copy chosen file: ${e.message}")
+                emitSignal("image_downloaded", "")
+            }
+        }
+        else if (requestCode == RequestCodes.REQUEST_WEB_IMAGE) {
+            val path = if (resultCode == Activity.RESULT_OK) data?.getStringExtra("path") ?: "" else ""
+            emitSignal("image_downloaded", path)
         }
         else if (requestCode == RequestCodes.REQUEST_PERMISSIONS) {
             if (SDK_INT >= Build.VERSION_CODES.R) {
@@ -155,12 +179,12 @@ class GodotAndroidPlugin(godot: Godot): GodotPlugin(godot) {
     @UsedByGodot
     private fun chooseFile() {
         val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+            type = "image/*"
             putExtra(DocumentsContract.EXTRA_INITIAL_URI, "/mnt/sdcard/Downloads")
             addFlags(Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION)
             addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         }
-
         activity?.startActivityForResult(intent, RequestCodes.REQUEST_GET_DOWNLOADED_IMAGE)
     }
 
@@ -310,27 +334,60 @@ class GodotAndroidPlugin(godot: Godot): GodotPlugin(godot) {
     }
 
     @UsedByGodot
+    private fun showTextInput(prompt: String, currentValue: String, isPassword: Boolean) {
+        activity?.runOnUiThread {
+            val editText = android.widget.EditText(activity)
+            editText.setText(currentValue)
+            editText.inputType = if (isPassword) {
+                android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD
+            } else {
+                android.text.InputType.TYPE_CLASS_TEXT
+            }
+            val dialog = android.app.AlertDialog.Builder(activity!!)
+                .setTitle(prompt)
+                .setView(editText)
+                .setPositiveButton("OK") { _, _ ->
+                    emitSignal("text_input_complete", editText.text.toString())
+                }
+                .setNegativeButton("Cancel") { _, _ ->
+                    emitSignal("text_input_complete", "")
+                }
+                .setOnCancelListener {
+                    emitSignal("text_input_complete", "")
+                }
+                .create()
+            dialog.show()
+            editText.requestFocus()
+            dialog.window?.setSoftInputMode(android.view.WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_VISIBLE)
+        }
+    }
+
+    @UsedByGodot
+    private fun launchWebImagePicker(game: String, system: String, source: String) {
+        val searchUrl = buildSearchUrl(game, system, source)
+        val intent = Intent(activity, WebImagePickerActivity::class.java).apply {
+            putExtra("searchUrl", searchUrl)
+            putExtra("gameName", game)
+        }
+        activity?.startActivityForResult(intent, RequestCodes.REQUEST_WEB_IMAGE)
+    }
+
+    @UsedByGodot
     private fun launchBrowserForDownload(game: String, system: String, source: String) {
-        var urlString = "https://www.google.com/search?tbm=isch&q=" + URLEncoder.encode(game + " " + system + " type:png", "utf-8")
+        val urlString = buildSearchUrl(game, system, source)
+        val launcher = Intent(Intent.ACTION_VIEW, Uri.parse(urlString))
+        launcher.flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+        Log.i(pluginName, "Attempting image search request for $source: $urlString")
+        activity?.startActivity(launcher)
+    }
 
-        if (source.lowercase().equals("tgdb")) {
-            urlString = "https://thegamesdb.net/search.php?name=" + URLEncoder.encode(game, "utf-8")
-        }
-        else if (source.lowercase().equals("duckduckgo")) {
-            urlString = "https://duckduckgo.com/?t=h_&iax=images&ia=images&q=" + URLEncoder.encode(game, "utf-8")
-        }
-        else if (source.lowercase().equals("launchbox")) {
-            urlString = "https://gamesdb.launchbox-app.com/games/results/" + URLEncoder.encode(game, "utf-8").replace("+", "%20")
-        }
-        else if (source.lowercase().equals("steamgriddb")) {
-            urlString = "https://www.steamgriddb.com/search/grids?term=" + URLEncoder.encode(game, "utf-8")
-        }
-        val launcher: Intent? = Intent(Intent.ACTION_VIEW, Uri.parse(urlString))
-        launcher?.flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
-        Log.i(pluginName, "Attempting image search request for " + source + ": " + urlString)
-
-        if (launcher != null) {
-            activity?.startActivity(launcher)
+    private fun buildSearchUrl(game: String, system: String, source: String): String {
+        return when (source.lowercase()) {
+            "tgdb" -> "https://thegamesdb.net/search.php?name=" + URLEncoder.encode(game, "utf-8")
+            "duckduckgo" -> "https://duckduckgo.com/?t=h_&iax=images&ia=images&q=" + URLEncoder.encode(game, "utf-8")
+            "launchbox" -> "https://gamesdb.launchbox-app.com/games/results/" + URLEncoder.encode(game, "utf-8").replace("+", "%20")
+            "steamgriddb" -> "https://www.steamgriddb.com/search/grids?term=" + URLEncoder.encode(game, "utf-8")
+            else -> "https://www.google.com/search?tbm=isch&q=" + URLEncoder.encode("$game $system box art", "utf-8")
         }
     }
 
@@ -387,7 +444,14 @@ class GodotAndroidPlugin(godot: Godot): GodotPlugin(godot) {
 
     override fun onMainResume() {
         super.onMainResume()
-        Log.i(pluginName,"RESUMING")
+        Log.i(pluginName, "RESUMING")
+        // On cold boot as a launcher the GL surface isn't ready when focus is
+        // first granted, leaving a black screen. Invalidating the decor view
+        // after a short delay nudges Android to redraw without touching the GL
+        // context (which would race with Godot's own resume and crash).
+        activity?.window?.decorView?.postDelayed({
+            activity?.window?.decorView?.invalidate()
+        }, 500)
     }
 
     /**
