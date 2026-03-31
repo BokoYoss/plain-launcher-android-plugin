@@ -504,7 +504,13 @@ class GodotAndroidPlugin(godot: Godot): GodotPlugin(godot) {
                     dataFile
                 )
                 intent.setData(uri)
-                Log.i(pluginName, "Created file provider uri: " + uri.path)
+                intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                intent.putExtra("uri", providedFile)
+                val targetPackage = intentMap.optString("componentPackage")
+                if (targetPackage != null && targetPackage != "") {
+                    activity?.grantUriPermission(targetPackage, uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                }
+                Log.i(pluginName, "Created file provider uri: " + uri.toString())
                 command += " -d \"" + uri.toString() + "\" "
             } catch (e: Exception) {
                 Log.e(pluginName, "Failed to make file provider: " + e.toString(), e)
@@ -534,11 +540,29 @@ class GodotAndroidPlugin(godot: Godot): GodotPlugin(godot) {
             Log.w(pluginName, "Skipping extras for " + intent.component?.packageName)
         }
 
-        command += "  --activity-clear-task --activity-clear-top --activity-no-history"
         Log.i(pluginName, command)
 
-        intent.flags =
-            Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_CLEAR_TASK or Intent.FLAG_ACTIVITY_NO_HISTORY or Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+        val flagNameMap = mapOf(
+            "FLAG_ACTIVITY_NEW_TASK" to Intent.FLAG_ACTIVITY_NEW_TASK,
+            "FLAG_ACTIVITY_RESET_TASK_IF_NEEDED" to Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED,
+            "FLAG_ACTIVITY_SINGLE_TOP" to Intent.FLAG_ACTIVITY_SINGLE_TOP,
+            "FLAG_ACTIVITY_CLEAR_TOP" to Intent.FLAG_ACTIVITY_CLEAR_TOP,
+            "FLAG_ACTIVITY_REORDER_TO_FRONT" to Intent.FLAG_ACTIVITY_REORDER_TO_FRONT,
+            "FLAG_GRANT_READ_URI_PERMISSION" to Intent.FLAG_GRANT_READ_URI_PERMISSION,
+            "FLAG_GRANT_WRITE_URI_PERMISSION" to Intent.FLAG_GRANT_WRITE_URI_PERMISSION,
+        )
+        val flagsArray = intentMap.optJSONArray("flags")
+        if (flagsArray != null) {
+            var flags = Intent.FLAG_ACTIVITY_NEW_TASK  // always required for launcher
+            for (i in 0 until flagsArray.length()) {
+                val name = flagsArray.optString(i)
+                flagNameMap[name]?.let { flags = flags or it }
+            }
+            intent.flags = flags
+        } else {
+            intent.flags =
+                Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+        }
         try {
             activity?.startActivity(intent)
         } catch (e: ActivityNotFoundException) {
