@@ -22,6 +22,7 @@ import org.godotengine.godot.Godot
 import org.godotengine.godot.plugin.GodotPlugin
 import org.godotengine.godot.plugin.SignalInfo
 import org.godotengine.godot.plugin.UsedByGodot
+import org.json.JSONArray
 import org.json.JSONException
 import org.json.JSONObject
 import java.io.File
@@ -107,7 +108,7 @@ class GodotAndroidPlugin(godot: Godot): GodotPlugin(godot) {
               }
             }
 
-            emitSignal("configure_storage_location", data?.data?.path)
+            emitSignal("configure_storage_location", data?.data?.path ?: "FAILURE")
         } else if (requestCode == RequestCodes.REQUEST_GET_DOWNLOADED_IMAGE) {
             Log.i(pluginName, "GOT RESULT FOR $requestCode WITH RETURN CODE $resultCode WITH DATA ${data?.data?.path}")
             if (resultCode != Activity.RESULT_OK || data?.data == null) {
@@ -267,8 +268,9 @@ class GodotAndroidPlugin(godot: Godot): GodotPlugin(godot) {
                 activity?.getSystemService(Context.STORAGE_SERVICE) as StorageManager
 
             storageManager.storageVolumes?.forEach { volume ->
-                if (volume.isRemovable) {
-                    return volume.directory.toString()
+                val directory = volume.directory
+                if (volume.isRemovable && volume.state == Environment.MEDIA_MOUNTED && directory != null) {
+                    return directory.toString()
                 }
             }
         } else {
@@ -392,12 +394,21 @@ class GodotAndroidPlugin(godot: Godot): GodotPlugin(godot) {
     }
 
     @UsedByGodot
-    private fun launchPackage(pkg: String) {
+    private fun launchPackage(pkg: String): String {
         val launcher: Intent? = activity?.packageManager?.getLaunchIntentForPackage(pkg)
-
-        if (launcher != null) {
-            activity?.startActivity(launcher)
+        if (launcher == null) {
+            Log.e(pluginName, "No launch intent for " + pkg)
+            return pkg + " not installed."
         }
+        try {
+            activity?.startActivity(launcher)
+        } catch (e: ActivityNotFoundException) {
+            Log.e(pluginName, pkg + " not found.")
+            return pkg + " not found."
+        } catch (e: Exception) {
+            return pkg + " failed to launch: " + e.message
+        }
+        return ""
     }
 
     @UsedByGodot
@@ -414,25 +425,20 @@ class GodotAndroidPlugin(godot: Godot): GodotPlugin(godot) {
             Log.w("PlainLauncher", "Unable to get installed applications")
             return "{}"
         }
-        val results = JSONObject()
+        val apps = mutableListOf<Pair<String, String>>()
         for (appInfo: ApplicationInfo in rawAppList!!) {
             if (activity?.packageManager?.getLaunchIntentForPackage(appInfo.packageName) == null) {
                 continue
             }
-            results.put(appInfo.loadLabel(packageManager).toString(), appInfo.packageName)
+            apps.add(Pair(appInfo.loadLabel(packageManager).toString(), appInfo.packageName))
+        }
+        val labelCounts = apps.groupingBy { it.first }.eachCount()
+        val results = JSONObject()
+        for ((label, pkg) in apps) {
+            val key = if (labelCounts[label]!! > 1) "$label ($pkg)" else label
+            results.put(key, pkg)
         }
         return results.toString()
-    }
-
-    @UsedByGodot
-    private fun launchDefaultApp(category: String): String {
-        val intent: Intent = Intent.makeMainSelectorActivity(Intent.ACTION_MAIN, category)
-        try {
-            activity?.startActivity(intent)
-        } catch (e: ActivityNotFoundException) {
-            return "NOT_FOUND"
-        }
-        return "SUCCESS"
     }
 
     @UsedByGodot
@@ -459,14 +465,73 @@ class GodotAndroidPlugin(godot: Godot): GodotPlugin(godot) {
      *
      * Shows a 'Hello World' toast.
      */
+    private fun providerUri(path: String, targetPackage: String): Uri? {
+        if (path == "") {
+            return null
+        }
+        try {
+            val uri = FileProvider.getUriForFile(activity!!, "plain.launcher.fileprovider", File(path))
+            if (targetPackage != "") {
+                activity?.grantUriPermission(targetPackage, uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            Log.i(pluginName, "Created file provider uri: " + uri.toString())
+            return uri
+        } catch (e: Exception) {
+            Log.e(pluginName, "Failed to make file provider: " + e.toString(), e)
+            return null
+        }
+    }
+
+    private fun putTypedExtra(intent: Intent, key: String, value: Any, resolve: (String) -> String) {
+        when (value) {
+            is Boolean -> intent.putExtra(key, value)
+            is Int -> intent.putExtra(key, value)
+            is Long -> intent.putExtra(key, value)
+            is Double -> intent.putExtra(key, value)
+            is JSONArray -> intent.putExtra(key, Array(value.length()) { resolve(value.optString(it)) })
+            is JSONObject -> {
+                val type = value.optString("type", "string")
+                val raw = value.opt("value")
+                val text = resolve((raw ?: "").toString()).trim()
+                try {
+                    when (type) {
+                        "string" -> intent.putExtra(key, text)
+                        "int" -> intent.putExtra(key, text.toInt())
+                        "long" -> intent.putExtra(key, text.toLong())
+                        "float" -> intent.putExtra(key, text.toFloat())
+                        "double" -> intent.putExtra(key, text.toDouble())
+                        "bool" -> intent.putExtra(key, text.lowercase() == "true" || text == "1")
+                        "uri" -> intent.putExtra(key, Uri.parse(text))
+                        "string_array" -> {
+                            if (raw is JSONArray) {
+                                intent.putExtra(key, Array(raw.length()) { resolve(raw.optString(it)) })
+                            } else {
+                                intent.putExtra(key, text.split(",").map { it.trim() }.toTypedArray())
+                            }
+                        }
+                        else -> throw IllegalArgumentException("unknown extra type '" + type + "' for " + key)
+                    }
+                } catch (e: NumberFormatException) {
+                    throw IllegalArgumentException("extra " + key + " expects " + type + " but got '" + text + "'")
+                }
+            }
+            else -> intent.putExtra(key, resolve(value.toString()))
+        }
+    }
+
     @UsedByGodot
     private fun launchIntent(serializedIntent: String): String? {
-        val intentMap: JSONObject = JSONObject(serializedIntent)
+        val intentMap: JSONObject
+        try {
+            intentMap = JSONObject(serializedIntent)
+        } catch (e: JSONException) {
+            Log.e(pluginName, "Invalid intent: " + serializedIntent)
+            return "Invalid intent config: " + e.message
+        }
 
         var packageName = intentMap.optString("package")
         if (packageName != null && packageName != "") {
-            launchPackage(packageName)
-            return "Launching " + packageName
+            return launchPackage(packageName)
         }
         var action = intentMap.optString("action", Intent.ACTION_MAIN)
 
@@ -487,57 +552,69 @@ class GodotAndroidPlugin(godot: Godot): GodotPlugin(godot) {
             Log.w(pluginName, "Missing component path: " + serializedIntent)
         }
 
-        var data = intentMap.optString("data")
-        if (data != null && data != "") {
-            //Log.i(pluginName, "Created file provider uri: " + uri.toString())
-            intent.setData(Uri.parse(data))
-            command += " -d \"" + data + "\" "
+        val targetPackage = intentMap.optString("componentPackage")
+        val gamePath = intentMap.optString("gamePath")
+        var gameUri: String? = null
+        val resolve = { value: String ->
+            if (value.contains("{game_uri}")) {
+                if (gameUri == null) {
+                    gameUri = providerUri(gamePath, targetPackage)?.toString() ?: ""
+                }
+                value.replace("{game_uri}", gameUri ?: "")
+            } else {
+                value
+            }
         }
 
-        var providedFile = intentMap.optString("providedFile")
-        if (providedFile != null && providedFile != "") {
-            var dataFile = File(providedFile)
-            try {
-                var uri: Uri = FileProvider.getUriForFile(
-                    activity,
-                    "plain.launcher.fileprovider",
-                    dataFile
-                )
-                intent.setData(uri)
-                intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        var dataUri: Uri? = null
+        val data = resolve(intentMap.optString("data"))
+        if (data != "") {
+            dataUri = Uri.parse(data)
+        }
+        val providedFile = intentMap.optString("providedFile")
+        if (providedFile != "") {
+            val uri = providerUri(providedFile, targetPackage)
+            if (uri != null) {
+                dataUri = uri
                 intent.putExtra("uri", providedFile)
-                val targetPackage = intentMap.optString("componentPackage")
-                if (targetPackage != null && targetPackage != "") {
-                    activity?.grantUriPermission(targetPackage, uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                }
-                Log.i(pluginName, "Created file provider uri: " + uri.toString())
-                command += " -d \"" + uri.toString() + "\" "
-            } catch (e: Exception) {
-                Log.e(pluginName, "Failed to make file provider: " + e.toString(), e)
             }
         }
+        val mimeType = intentMap.optString("type")
+        if (dataUri != null && mimeType != "") {
+            intent.setDataAndType(dataUri, mimeType)
+        } else if (dataUri != null) {
+            intent.setData(dataUri)
+        } else if (mimeType != "") {
+            intent.setType(mimeType)
+        }
+        command += " -d \"" + dataUri.toString() + "\" -t \"" + mimeType + "\" "
 
-        var category = intentMap.optString("category")
-        if (category != null && category != "") {
-            Log.d(pluginName, category)
-            intent.addCategory(category)
-            command += " -c \"" + category + "\" "
+        val categories = mutableListOf<String>()
+        val category = intentMap.optString("category")
+        if (category != "") {
+            categories.add(category)
+        }
+        val categoryArray = intentMap.optJSONArray("categories")
+        if (categoryArray != null) {
+            for (i in 0 until categoryArray.length()) {
+                categories.add(categoryArray.optString(i))
+            }
+        }
+        for (name in categories) {
+            intent.addCategory(name)
+            command += " -c \"" + name + "\" "
         }
 
-        try {
-            // TODO: Why doesn't optJSONObject and null check work here?
-            val extraMap: JSONObject = intentMap.getJSONObject("extras")
-            if (extraMap != null) {
-                val extraKeys: Iterator<String> = extraMap.keys()
-                extraKeys.forEach { extraKey ->
-                    var extraValue: String = extraMap.getString(extraKey)
-                    intent.putExtra(extraKey, extraMap.getString(extraKey))
-                    command += " -e " + extraKey + " \"" + extraValue + "\" "
+        val extraMap = intentMap.optJSONObject("extras")
+        if (extraMap != null) {
+            try {
+                for (extraKey in extraMap.keys()) {
+                    putTypedExtra(intent, extraKey, extraMap.get(extraKey), resolve)
+                    command += " -e " + extraKey + " \"" + extraMap.get(extraKey).toString() + "\" "
                 }
+            } catch (e: IllegalArgumentException) {
+                return "Invalid intent config: " + e.message
             }
-        } catch (e: JSONException) {
-            // don't worry if we don't have extras
-            Log.w(pluginName, "Skipping extras for " + intent.component?.packageName)
         }
 
         Log.i(pluginName, command)
@@ -548,6 +625,8 @@ class GodotAndroidPlugin(godot: Godot): GodotPlugin(godot) {
             "FLAG_ACTIVITY_SINGLE_TOP" to Intent.FLAG_ACTIVITY_SINGLE_TOP,
             "FLAG_ACTIVITY_CLEAR_TOP" to Intent.FLAG_ACTIVITY_CLEAR_TOP,
             "FLAG_ACTIVITY_REORDER_TO_FRONT" to Intent.FLAG_ACTIVITY_REORDER_TO_FRONT,
+            "FLAG_ACTIVITY_CLEAR_TASK" to Intent.FLAG_ACTIVITY_CLEAR_TASK,
+            "FLAG_ACTIVITY_NO_HISTORY" to Intent.FLAG_ACTIVITY_NO_HISTORY,
             "FLAG_GRANT_READ_URI_PERMISSION" to Intent.FLAG_GRANT_READ_URI_PERMISSION,
             "FLAG_GRANT_WRITE_URI_PERMISSION" to Intent.FLAG_GRANT_WRITE_URI_PERMISSION,
         )
